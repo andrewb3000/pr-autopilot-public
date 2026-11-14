@@ -1,0 +1,109 @@
+# The PR autopilot dispatcher as a unikernel, woken from outside (docs/dispatcher.md,
+# "Unikernel, woken by the laptop"). A second option next to the Kata one in
+# dispatcher-workload.yaml; both may run at once, the lock in the state decides who works.
+# Deploy, after the Secret (with TICK_TOKEN) and the ConfigMap exist, with:
+#   datumctl compute deploy -f remote/dispatcher-workload-unikernel.yaml --project my-project
+#   datumctl apply -f remote/dispatcher-url-unikernel.yaml --project my-project
+#
+# - runtime class `unikernel`. The platform parks an idle instance and its clock stops, so
+#   the poll loop alone does not run it. It is woken by requests: POST /tick from the
+#   laptop's stats job every minute, through the public URL, and worker callbacks over gVPC.
+# - Port 8080 is declared, named "http": dispatcher-url-unikernel.yaml publishes it on a
+#   Datum-managed HTTPS URL (`datumctl compute deploy --http-port` cannot be combined with
+#   -f yet). /tick, /callback and /healthz are then public; /tick and /callback need tokens.
+# - Workload name: at most 39 characters (the instance name below must stay a 63-character
+#   DNS label) and not the Kata one's. "pr-autopilot-dispatcher-unikernel" is 33.
+# - Image: the "-unikernel" copy the dispatcher-image workflow prints ("unikernel: ..."),
+#   packaged by `datumctl compute build` for platform datum/x86_64. The plain image does
+#   not pull on this class.
+#
+# Needs, in the same project:
+#   Secret pr-autopilot-dispatcher, keys GITHUB_TOKEN, MILO_CREDENTIALS, TICK_TOKEN
+#     (remote/make-dispatcher-config.py --tick-token-file), SLACK_WEBHOOK and KEYPROXY_HMAC
+#     optional
+#   ConfigMap pr-autopilot-repos, key repos.json
+apiVersion: compute.datumapis.com/v1alpha
+kind: Workload
+metadata:
+  name: pr-autopilot-dispatcher-unikernel
+  labels:
+    app: pr-autopilot-dispatcher
+spec:
+  placements:
+  - name: main
+    cityCodes: [DFW]
+    scaleSettings:
+      minReplicas: 1
+  template:
+    metadata:
+      labels:
+        app: pr-autopilot-dispatcher
+    spec:
+      networkInterfaces:
+      - network:
+          name: default
+      volumes:
+      - name: repos
+        configMap:
+          name: pr-autopilot-repos
+      runtime:
+        class: unikernel
+        resources:
+          instanceType: datumcloud-d1-standard-2
+        sandbox:
+          containers:
+          - name: dispatcher
+            image: ghcr.io/example-user/pr-autopilot-dispatcher@sha256:REPLACE_WITH_THE_UNIKERNEL_DIGEST_CI_PRINTED
+            ports:
+            - name: http
+              port: 8080
+              protocol: TCP
+            volumeAttachments:
+            - name: repos
+              mountPath: /config
+            env:
+            - name: PR_AUTOPILOT_CONFIG
+              value: /config/repos.json
+            - name: PR_AUTOPILOT_CALLBACK_URL
+              value: http://pr-autopilot-dispatcher-unikernel-main-us-central-1-0.instances.datum.internal:8080/callback
+            - name: PR_AUTOPILOT_LISTEN_PORT
+              value: "8080"
+            - name: PR_AUTOPILOT_MAX_WORKERS
+              value: "3"
+            - name: PR_AUTOPILOT_OWNER
+              value: dispatcher@datum-unikernel
+            - name: PR_AUTOPILOT_TICK_WAIT
+              value: "5"
+            - name: PR_AUTOPILOT_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: GITHUB_TOKEN
+            - name: PR_AUTOPILOT_MILO_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: MILO_CREDENTIALS
+            - name: PR_AUTOPILOT_TICK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: TICK_TOKEN
+            # The credential proxy (remote/keyproxy-workload.yaml). With the URL set, workers get
+            # placeholders instead of the real Claude token, MCP keys and GitHub read token, and
+            # no Secret review-credentials; see docs/dispatcher.md "Credential proxy" for the
+            # rollout and rollback. Unset, workers use review-credentials.
+            - name: PR_AUTOPILOT_KEYPROXY_URL
+              value: http://pr-autopilot-keyproxy-main-us-central-1-0.instances.datum.internal:8080
+            - name: PR_AUTOPILOT_KEYPROXY_HMAC
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: KEYPROXY_HMAC
+                  optional: true
+            - name: PR_AUTOPILOT_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: SLACK_WEBHOOK
+                  optional: true

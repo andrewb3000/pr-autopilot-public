@@ -1,0 +1,11 @@
+{
+  "apiVersion": "iam.miloapis.com/v1alpha1",
+  "kind": "PolicyBinding",
+  "metadata": {"name": "project-my-project-pr-autopilot-dispatcher-editor", "namespace": "organization-my-org"},
+  "spec": {
+    "roleRef": {"name": "editor", "namespace": "datum-cloud"},
+    "subjects": [{"kind": "ServiceAccount", "name": "pr-autopilot-dispatcher", "uid": "SA_UID"}],
+    "resourceSelector": {"resourceRef": {"apiGroup": "resourcemanager.miloapis.com", "kind": "Project",
+                                         "name": "my-project", "uid": "PROJECT_UID"}}
+  }
+}

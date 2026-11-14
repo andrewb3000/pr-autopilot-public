@@ -1,0 +1,143 @@
+# Builds the dispatcher image (remote/dispatcher.Dockerfile) and pushes two copies to
+# ghcr.io/example-user/pr-autopilot-dispatcher. Neither holds secrets.
+#
+# - <commit sha>: a plain linux/amd64 image for the `general-purpose` (Kata) runtime class.
+#   This is the one remote/dispatcher-workload.yaml deploys.
+# - <commit sha>-unikernel: packaged by `datumctl compute build` for platform datum/x86_64,
+#   the only platform the `unikernel` runtime pulls. remote/dispatcher-workload-unikernel.yaml
+#   deploys it; the laptop wakes it with POST /tick, because the platform parks an idle
+#   unikernel and a parked VM's poll loop stops (docs/dispatcher.md).
+#
+# Docker builds a local copy first for the start, size and repos.json checks; nothing is
+# pushed before they pass. Deploy by the digest this job prints.
+name: Dispatcher image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - remote/dispatcher.Dockerfile
+      - remote/Dockerfile
+      - remote/review-job.py
+      - claude_cli.py
+      - dashboard.py
+      - dispatcher.py
+      - full_review.py
+      - github_api.py
+      - keyproxy.py
+      - milo_api.py
+      - pr_worker.py
+      - remote_review.py
+      - reviewer.py
+      - state_store.py
+      - render-diff
+      - .github/workflows/dispatcher-image.yaml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dispatcher-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/example-user/pr-autopilot-dispatcher
+      MAX_IMAGE_MB: "100"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the tests
+        run: python3 -m unittest test_reviewer test_dispatcher test_keyproxy
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build into the local Docker first: nothing is pushed until the checks below pass.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: remote/dispatcher.Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: pr-autopilot-dispatcher:check
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # The image has no shell; this runs its own interpreter on its own code. With no
+      # env it must stop with a clear message, which proves the imports work.
+      - name: Check the image starts
+        run: |
+          out=$(docker run --rm --platform linux/amd64 pr-autopilot-dispatcher:check 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "dispatcher: missing PR_AUTOPILOT_GITHUB_TOKEN"
+          # The credential proxy runs from the same image (remote/keyproxy-workload.yaml).
+          out=$(docker run --rm --platform linux/amd64 --entrypoint /app/python pr-autopilot-dispatcher:check /app/keyproxy.py 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "keyproxy: PR_AUTOPILOT_KEYPROXY_HMAC must be"
+
+      - name: Check the image size and that it holds no repos.json
+        run: |
+          bytes=$(docker image inspect pr-autopilot-dispatcher:check --format '{{.Size}}')
+          echo "image size: $((bytes / 1024 / 1024)) MB (limit ${MAX_IMAGE_MB} MB)"
+          test "$bytes" -lt $((MAX_IMAGE_MB * 1024 * 1024))
+          id=$(docker create pr-autopilot-dispatcher:check)
+          if docker export "$id" | tar -t | grep -q 'repos.json$'; then echo "repos.json is in the image"; exit 1; fi
+          docker rm "$id" >/dev/null
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same inputs and labels, so BuildKit reuses what it just built and checked.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: push
+        with:
+          context: .
+          file: remote/dispatcher.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Install datumctl and its compute plugin
+        env:
+          DATUMCTL_VERSION: v0.24.0
+          DATUMCTL_SHA256: 8141d1ee98bc0a3f17e92b58086e82bab23b8d790c3ec52a68ef061ba9a19982
+          COMPUTE_PLUGIN: example-org/compute@v0.14.3
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o datumctl.tgz "https://github.com/example-org/datumctl/releases/download/${DATUMCTL_VERSION}/datumctl_Linux_x86_64.tar.gz"
+          echo "${DATUMCTL_SHA256}  datumctl.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf datumctl.tgz -C "$RUNNER_TEMP/bin" datumctl && rm datumctl.tgz
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/datumctl" plugin install "$COMPUTE_PLUGIN"
+
+      # The same Dockerfile, packaged for platform datum/x86_64 and pushed with the login above.
+      - name: Package and push for the unikernel runtime
+        id: unikernel
+        run: |
+          out=$(datumctl compute build -f remote/dispatcher.Dockerfile --push --output "${IMAGE}:${{ github.sha }}-unikernel" . 2>&1)
+          echo "$out" | tail -5
+          digest=$(echo "$out" | grep -o 'sha256:[0-9a-f]\{64\}' | tail -1)
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Print the reference to deploy
+        run: |
+          {
+            echo "general-purpose (deploy this): ${IMAGE}@${{ steps.push.outputs.digest }}"
+            echo "unikernel: ${IMAGE}@${{ steps.unikernel.outputs.digest }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

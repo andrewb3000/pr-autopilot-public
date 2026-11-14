@@ -1,0 +1,32 @@
+{
+  "example-org/infra": {
+    "authors": [
+      "alice",
+      "bob",
+      "carol",
+      "dave"
+    ],
+    "review": "full",
+    "model": "opus",
+    "full_review_paths": [
+      "(^|/)prod(uction)?(/|$)",
+      "^clusters/(?!staging/|preview/)",
+      "^channels/(edge/stable|edge/components|flux)/",
+      "rbac|clusterrole|rolebinding",
+      "^(gcp|aws|github|github-org)/"
+    ],
+    "context": "A GitOps repository (Flux, Kustomize) that deploys staging and production clusters. Changes under production paths reach production after merge."
+  },
+  "example-org/*": {
+    "authors": [
+      "alice",
+      "bob",
+      "carol",
+      "dave"
+    ],
+    "review": "full",
+    "model": "opus",
+    "vm_can_read": true,
+    "context": "A repository in the example-org GitHub organization; check its README and any CLAUDE.md for conventions."
+  }
+}

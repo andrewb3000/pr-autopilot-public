@@ -1,0 +1,64 @@
+# The public HTTPS URL of the unikernel dispatcher (dispatcher-workload-unikernel.yaml).
+#
+# These are the two objects `datumctl compute deploy --http-port` writes, field for field
+# (example-org/compute, internal/cmd/compute/url/resources.go, BuildNetworkService and
+# BuildHTTPProxy): a NetworkService that selects the workload's instances by label and
+# names port "http", and an HTTPProxy with one rule whose one backend is that port. No
+# hostnames and no matches: the platform assigns the hostname and the rule matches "/".
+# `--http-port` cannot be combined with -f yet, so they are written here.
+#
+# Both carry the workload's name and uid labels and an owner reference to it, like
+# datumctl's own, so `datumctl compute` treats them as the workload's URL (it checks the
+# workload-name label) and `datumctl compute destroy` cleans them up. The uid exists only
+# once the Workload does, so apply after it, with the uid filled in:
+#   uid=$(datumctl get workload pr-autopilot-dispatcher-unikernel --project my-project -o jsonpath='{.metadata.uid}')
+#   sed "s/REPLACE_WITH_THE_WORKLOAD_UID/$uid/" remote/dispatcher-url-unikernel.yaml | datumctl apply -f - --project my-project
+#   datumctl get httpproxy pr-autopilot-dispatcher-unikernel --project my-project -o json
+#     (status.hostnames, or status.canonicalHostname)
+# The Kata dispatcher has no URL.
+apiVersion: networking.datumapis.com/v1alpha
+kind: NetworkService
+metadata:
+  name: pr-autopilot-dispatcher-unikernel
+  namespace: default
+  labels:
+    compute.datumapis.com/workload-name: pr-autopilot-dispatcher-unikernel
+    compute.datumapis.com/workload-uid: REPLACE_WITH_THE_WORKLOAD_UID
+  ownerReferences:
+  - apiVersion: compute.datumapis.com/v1alpha
+    kind: Workload
+    name: pr-autopilot-dispatcher-unikernel
+    uid: REPLACE_WITH_THE_WORKLOAD_UID
+    controller: false
+    blockOwnerDeletion: false
+spec:
+  networkInterfaces:
+    selector:
+      matchLabels:
+        compute.datumapis.com/workload-name: pr-autopilot-dispatcher-unikernel
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+---
+apiVersion: networking.datumapis.com/v1alpha
+kind: HTTPProxy
+metadata:
+  name: pr-autopilot-dispatcher-unikernel
+  namespace: default
+  labels:
+    compute.datumapis.com/workload-name: pr-autopilot-dispatcher-unikernel
+    compute.datumapis.com/workload-uid: REPLACE_WITH_THE_WORKLOAD_UID
+  ownerReferences:
+  - apiVersion: compute.datumapis.com/v1alpha
+    kind: Workload
+    name: pr-autopilot-dispatcher-unikernel
+    uid: REPLACE_WITH_THE_WORKLOAD_UID
+    controller: false
+    blockOwnerDeletion: false
+spec:
+  rules:
+  - backends:
+    - networkService:
+        name: pr-autopilot-dispatcher-unikernel
+        port: http

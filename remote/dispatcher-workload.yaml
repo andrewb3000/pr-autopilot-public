@@ -1,0 +1,86 @@
+# The PR autopilot dispatcher on Datum (docs/dispatcher.md). Deploy, after the Secret and
+# ConfigMap below exist, with:
+#   datumctl compute deploy -f remote/dispatcher-workload.yaml --project my-project
+#
+# - runtime class `general-purpose` (Kata). The code also fits `unikernel` (one process,
+#   no exec), but since 2026-11-12 the platform parks an idle unikernel instance even with
+#   no declared port. A parked VM's clock stops, so the poll loop stops after one pass
+#   (docs/dispatcher.md, "Why not unikernel"). Kata instances are not parked.
+# - No declared port: nothing outside the project calls it. The callback server listens on
+#   8080, with a listen backlog of 128, and workers reach it over gVPC by private DNS.
+# - Workload name: at most 39 characters (instance name <workload>-main-us-central-1-0 must
+#   stay a 63-character DNS label; compute accepts longer names but never starts them).
+#   "pr-autopilot-dispatcher" is 23.
+# - Image pinned by digest: replace the digest with the one the dispatcher-image workflow
+#   printed for the commit you deploy, the "general-purpose" line (linux/amd64). The
+#   "-unikernel" image only runs on the unikernel class.
+#
+# Needs, in the same project:
+#   Secret pr-autopilot-dispatcher, keys:
+#     GITHUB_TOKEN      classic PAT (scopes repo, notifications) that approves as you
+#     MILO_CREDENTIALS  the service account's key JSON
+#     SLACK_WEBHOOK     optional
+#   ConfigMap pr-autopilot-repos, key repos.json (a copy of this repo's repos.json)
+#   Secret review-credentials (already there: the workers use it, not the dispatcher)
+apiVersion: compute.datumapis.com/v1alpha
+kind: Workload
+metadata:
+  name: pr-autopilot-dispatcher
+  labels:
+    app: pr-autopilot-dispatcher
+spec:
+  placements:
+  - name: main
+    cityCodes: [DFW]
+    scaleSettings:
+      minReplicas: 1
+  template:
+    metadata:
+      labels:
+        app: pr-autopilot-dispatcher
+    spec:
+      networkInterfaces:
+      - network:
+          name: default
+      volumes:
+      - name: repos
+        configMap:
+          name: pr-autopilot-repos
+      runtime:
+        class: general-purpose
+        resources:
+          instanceType: datumcloud-d1-standard-2
+        sandbox:
+          containers:
+          - name: dispatcher
+            image: ghcr.io/example-user/pr-autopilot-dispatcher@sha256:5b1b919db30ae2b2de845de33bceba577718d857387170cfcc92497ae32c9588
+            volumeAttachments:
+            - name: repos
+              mountPath: /config
+            env:
+            - name: PR_AUTOPILOT_CONFIG
+              value: /config/repos.json
+            - name: PR_AUTOPILOT_CALLBACK_URL
+              value: http://pr-autopilot-dispatcher-main-us-central-1-0.instances.datum.internal:8080/callback
+            - name: PR_AUTOPILOT_LISTEN_PORT
+              value: "8080"
+            - name: PR_AUTOPILOT_MAX_WORKERS
+              value: "3"
+            - name: PR_AUTOPILOT_OWNER
+              value: dispatcher@datum
+            - name: PR_AUTOPILOT_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: GITHUB_TOKEN
+            - name: PR_AUTOPILOT_MILO_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: MILO_CREDENTIALS
+            - name: PR_AUTOPILOT_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-dispatcher
+                  key: SLACK_WEBHOOK
+                  optional: true

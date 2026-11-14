@@ -1,0 +1,38 @@
+#!/bin/bash
+# Render one Kustomize path in the base and PR checkouts and print a unified diff.
+# Used by the full-review agent, which may not redirect output to files itself.
+#
+# Plain `kustomize build`: no Helm, exec plugins or remote bases, so it needs no
+# network and runs no code from the PR.
+#
+# Usage: render-diff <base_dir> <pr_dir> <path-relative-to-repo-root>
+set -uo pipefail
+
+if [ $# -ne 3 ]; then
+  echo "usage: render-diff <base_dir> <pr_dir> <relative_path>" >&2
+  exit 2
+fi
+base=$1 pr=$2 rel=$3
+case "$rel" in
+  /* | *..*) echo "render-diff: path must be relative to the repo root, without '..'" >&2; exit 2 ;;
+esac
+
+# The sandbox blocks /dev/fd and the shared temp dir, but the base checkout is the
+# agent's working directory and writable, so the two renders go there briefly.
+tmp=$(mktemp -d "$base/.render-diff.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT
+
+render() {  # $1 = checkout, $2 = output file
+  if [ -d "$1/$rel" ]; then
+    kustomize build "$1/$rel" >"$2" 2>&1 || echo "# kustomize build failed (see above)" >>"$2"
+  else
+    echo "# $rel does not exist in this checkout" >"$2"
+  fi
+}
+
+render "$base" "$tmp/base.yaml"
+render "$pr" "$tmp/pr.yaml"
+if diff -u --label "base/$rel" --label "pr/$rel" "$tmp/base.yaml" "$tmp/pr.yaml"; then
+  echo "# no difference in the rendered output of $rel"
+fi
+exit 0

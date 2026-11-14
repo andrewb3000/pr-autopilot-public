@@ -1,0 +1,112 @@
+# The credential proxy for the review workers (keyproxy.py, docs/dispatcher.md
+# "Credential proxy"). It holds the real Claude token, MCP keys and GitHub read tokens;
+# workers get placeholders the dispatcher mints per job, and send Claude, MCP and GitHub
+# traffic here.
+# Deploy, after its Secret exists, with:
+#   datumctl compute deploy -f remote/keyproxy-workload.yaml --project my-project
+#
+# - runtime class `unikernel`: one stdlib Python process that only makes HTTP calls.
+#   Parking is fine: every upstream call happens inside an open inbound request, and an
+#   open request keeps the instance awake.
+# - Port 8080 is declared but NOT published: no NetworkService and no HTTPProxy, so the
+#   proxy has no public URL. Workers reach it over gVPC at
+#   http://pr-autopilot-keyproxy-main-us-central-1-0.instances.datum.internal:8080
+#   (the dispatcher's PR_AUTOPILOT_KEYPROXY_URL). That traffic is plain HTTP inside the
+#   project's network, which has no firewall yet; the placeholders authenticate each call.
+# - Workload name: at most 39 characters (the instance name must stay a 63-character DNS
+#   label). "pr-autopilot-keyproxy" is 21.
+# - Image: the "-unikernel" copy of the dispatcher image (dispatcher-image workflow,
+#   "unikernel: ..."), which also holds keyproxy.py. `command` runs the proxy instead of
+#   the dispatcher.
+#
+# Needs, in the same project, Secret pr-autopilot-keyproxy with keys:
+#   KEYPROXY_HMAC               shared with the dispatcher's Secret (same value)
+#   CLAUDE_CODE_OAUTH_TOKEN     the real Claude token
+#   DATUM_MCP_API_KEY_STAGING, DATUM_MCP_API_KEY_PROD   the real MCP keys, optional
+#   GH_TOKEN                    the workers' read-only GitHub token (without it the
+#                               github routes answer 503)
+#   GH_TOKEN_<OWNER>            optional: one owner's own read token. Only the owners
+#                               listed below reach the proxy; add an entry for a new one.
+# remote/make-dispatcher-config.py --keyproxy-* and --github-* write it.
+apiVersion: compute.datumapis.com/v1alpha
+kind: Workload
+metadata:
+  name: pr-autopilot-keyproxy
+  labels:
+    app: pr-autopilot-keyproxy
+spec:
+  placements:
+  - name: main
+    cityCodes: [DFW]
+    scaleSettings:
+      minReplicas: 1
+  template:
+    metadata:
+      labels:
+        app: pr-autopilot-keyproxy
+    spec:
+      networkInterfaces:
+      - network:
+          name: default
+      runtime:
+        class: unikernel
+        resources:
+          instanceType: datumcloud-d1-standard-2
+        sandbox:
+          containers:
+          - name: keyproxy
+            image: ghcr.io/example-user/pr-autopilot-dispatcher@sha256:REPLACE_WITH_THE_UNIKERNEL_DIGEST_CI_PRINTED
+            command: ["/app/python", "/app/keyproxy.py"]
+            ports:
+            - name: http
+              port: 8080
+              protocol: TCP
+            env:
+            - name: PR_AUTOPILOT_KEYPROXY_PORT
+              value: "8080"
+            - name: PR_AUTOPILOT_KEYPROXY_HMAC
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: KEYPROXY_HMAC
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: CLAUDE_CODE_OAUTH_TOKEN
+            - name: DATUM_MCP_API_KEY_STAGING
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: DATUM_MCP_API_KEY_STAGING
+                  optional: true
+            - name: DATUM_MCP_API_KEY_PROD
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: DATUM_MCP_API_KEY_PROD
+                  optional: true
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: GH_TOKEN
+                  optional: true
+            - name: GH_TOKEN_EXAMPLE_ORG
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: GH_TOKEN_EXAMPLE_ORG
+                  optional: true
+            - name: GH_TOKEN_LABS_ORG
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: GH_TOKEN_LABS_ORG
+                  optional: true
+            - name: GH_TOKEN_OTHER_ORG
+              valueFrom:
+                secretKeyRef:
+                  name: pr-autopilot-keyproxy
+                  key: GH_TOKEN_OTHER_ORG
+                  optional: true
